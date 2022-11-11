@@ -1,0 +1,210 @@
+---
+title: "exploring_protest_type"
+output: 
+      pdf_document: default
+      html_document:
+        df_print: paged
+Name: Manasvi Khanna
+---
+
+```{r}
+rm(list = ls())
+```
+
+
+
+```{r}
+getwd() # set working directory 
+dir <- "/Users/manasvikhanna/Desktop/Farmer's Protest/farmers_protest_git"
+setwd(dir)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggmap)
+library(spatstat)
+library(tigris)
+library(spdep)
+library(ggplot2)
+library(broom)
+library(sp)
+library(raster)
+library(tidycensus)
+library(maditr)
+library(gridExtra)
+```
+
+```{r}
+allProtests <- read.csv("data/original/Farmer_s Protest Data.csv") # read data
+colnames(allProtests)
+table(allProtests$year) # check which years are represented in the data 
+```
+
+```{r}
+# since we only need the protests that happened after the new laws
+farmers_protest <- filter(allProtests,year >2018) 
+table(farmers_protest$year)
+```
+
+```{r}
+# reading a shape of India that has data at state level 
+state_shape <- rgdal::readOGR(dsn = "/Users/manasvikhanna/Desktop/Farmer's Protest/shape_files/maps-f0f120311fefd5049b0dab6856c2fa5bf06e9b08/States",
+                               layer= "Admin2")
+```
+```{r}
+# This is the data saved from Loading Data Sets with out demographic controls 
+demographic_date <- read.csv("data/working/demographic_data.csv")
+```
+
+```{r}
+# transform shapefile to standard projections 
+state_shape <- spTransform(state_shape, CRS("+init=epsg:24370"))
+```
+
+```{r}
+copyFarmer <- farmers_protest
+coordinates(copyFarmer) <- ~longitude+latitude 
+class(copyFarmer)
+```
+
+```{r}
+# set cooridates on the farmers protest to match shape file
+
+proj4string(copyFarmer) <- "+proj=longlat +datum=WGS84 +no_defs"
+copyFarmer <- spTransform(copyFarmer, CRS("+init=epsg:24370"))
+```
+
+```{r}
+# check if projections mathc 
+c(proj4string(copyFarmer), proj4string(state_shape))
+```
+
+```{r}
+in_fortify <- broom::tidy(state_shape)
+```
+
+```{r}
+state_shape$id <- row.names(state_shape)
+in_fortify <- left_join(in_fortify, state_shape@data)
+```
+```{r}
+# Join shape file with demographic data 
+state_shape@data <- left_join(state_shape@data, demographic_date, by = c("ST_NM" = "ST_NM"))
+
+```
+
+```{r}
+# classify peaceful vs non peaceful into subsets for modelling comparisons
+
+sub1 <- copyFarmer[copyFarmer$sub_event_type == "Peaceful protest",]
+sub2 <- copyFarmer[copyFarmer$sub_event_type != "Peaceful protest",]
+nrow(sub2)
+```
+
+```{r}
+ind_poly <- as(state_shape, "SpatialPolygons")
+ind_poly <- spTransform(ind_poly, CRS("+init=epsg:24370")) #project them
+```
+
+```{r}
+ind_one <- st_transform(st_union(st_as_sf(ind_poly)), crs = CRS("+init=epsg:24370")) #comb
+```
+
+```{r}
+ind_win <- as.owin(as_Spatial(ind_one)) #transform into window
+```
+
+```{r}
+#coordinates(sub1) <- ~longitude+latitude
+proj4string(sub1) <- proj4string(state_shape)
+# reproject to match window
+sub1 <- spTransform(sub1, CRS("+init=epsg:24370"))
+sub2 <- spTransform(sub2, CRS("+init=epsg:24370"))
+```
+
+
+```{r}
+over_dat1 <- over(sub1, ind_poly)
+over_dat2 <- over(sub2, ind_poly)
+length(which(is.na(over_dat2))) #0: they are all in the window
+```
+
+
+```{r}
+# use the ppp (possion point process model) to calculate intensity 
+sub1_ppp <- as.ppp(sub1@coords, W = ind_win)
+plot(sub1_ppp)
+```
+```{r}
+# use the ppp (possion point process model) to calculate intensity 
+
+sub2_ppp <- as.ppp(sub2@coords, W = ind_win)
+plot(sub2_ppp)
+```
+```{r}
+# Use the density funciton to get density from the ppp model 
+kernel_density1 <- density(sub1_ppp)
+plot(kernel_density1, main = "KDE: Protest Type: Peaceful")
+plot(sub1_ppp, add = T)
+```
+
+```{r}
+kernel_density2 <- density(sub2_ppp)
+plot(kernel_density2, main = "KDE: Protest Type: Not Peaceful")
+plot(sub2_ppp, add = T)
+```
+
+```{r}
+ppm(sub1_ppp, ~1)
+ppm(sub2_ppp, ~1)
+```
+
+
+```{r}
+# rescale to control for really high valeus
+sub1rescaled <- rescale(sub1_ppp, 100000)
+sub2rescaled <- rescale(sub2_ppp, 100000)
+```
+
+```{r}
+# fit rescaled subsets to point process model with a linear trend in coordinates
+
+fit1 <- ppm(Q = sub1rescaled, trend = ~x + y)
+summary(fit1)
+plot(fit1, main = "Protest Type: Not Peaceful")
+
+```
+```{r}
+fit2 <- ppm(Q = sub2rescaled, trend = ~x + y)
+summary(fit2)
+plot(fit2)
+```
+
+```{r}
+
+lattice <- expand.grid(Long = seq(state_shape@bbox[1,1],
+                                  state_shape@bbox[1,2],length.out = 100), 
+                       Lat = seq(state_shape@bbox[2,1],
+                                 state_shape@bbox[2,2],length.out = 100))
+dim(lattice)
+plot(lattice)
+```
+
+```{r}
+sp_lattice <- lattice
+coordinates(sp_lattice) <- ~ Long+Lat
+proj4string(sp_lattice) <- proj4string(state_shape)
+overlap_set <- over(sp_lattice, state_shape)
+```
+
+
+```{r}
+lattice <- lattice[!(is.na(overlap_set$ST_NM)),]
+plot(lattice)
+```
